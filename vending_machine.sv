@@ -1,11 +1,4 @@
 
-
-    interface data_in_if(input bit clk, input bit rst_n );
-        logic [31:0] regs_data_in;
-        logic regs_we;
-        logic [7:0] regs_addr;
-    endinterface
-
     interface user_in_if(input bit clk, input bit rst_n );
         logic [8:0] client_id;
         logic [5:0] coin_in;
@@ -16,23 +9,11 @@
         logic no_change;
         logic [9:0] item_empty; 
         logic [7:0] client_points;
-        logic done;
+        logic confirmed;
+        logic coin_inserted;
+        logic id_valid
     endinterface
 
-    interface admin_in_if(input bit clk, input bit rst_n );
-        logic [31:0] admin_password;
-    endinterface
-
-    interface security_in_if(input bit clk, input bit rst_n );
-        logic tamper_detect;
-        logic jam_detect;
-        logic power_loss;
-    endinterface
-
-    interface data_out_if(input bit clk, input bit rst_n );
-        logic access_error;
-        logic alarm;
-    endinterface
 
 
     package vending_machine
@@ -46,39 +27,14 @@
 
         typedef enum {CUR_RUB=2'b00, CUR_USD=2'b01, CUR_EUR=2'b10} money_type;
 
-        class change_data_in_item  extends uvm_sequence_item;;
-            logic [31:0] regs_data_in;
-            logic [31:0] regs_data_out;
-            logic regs_we;
-            logic [7:0] regs_addr;
-
-            `uvm_object_utils_begin(change_data_in)
-                `uvm_field_int(regs_data_in , UVM_ALL_ON)
-                `uvm_field_int(regs_we , UVM_ALL_ON)
-                `uvm_field_int(regs_addr, UVM_ALL_ON)
-                `uvm_field_int(regs_data_out, UVM_DEFAULT)
-            `uvm_object_utils_end
-
-            function new(string name = "change_data_in");
-                super.new(name);
-            endfunction
-
-            function void randomize();
-                regs_data_in = random_range(0, ~32'd0); 
-                regs_we = random_range(0, 1);
-                regs_addr = random_range(0, ~8'd0);
-            endfunction
-
-        endclass  
-
         class item_buy_item extends uvm_sequence_item;
-            logic [8:0] client_id;
+            int client_id;
             typedef struct {
                 money_type cur;
                 logic [5:0] value;
             } coin_s;
             coin_s coins[$];
-            logic [30:0] item_select; 
+            int item_selected; 
             logic [31:0] change_out 
             logic [9:0] item_out
             logic [7:0] client_points 
@@ -90,13 +46,14 @@
             endfunction
 
             function void m_random();
-
-                client_id = random_range(0,  ~9'd0);
-                item_select  = (9'd1) << random_range(0, 8);
+                int num_coins = random_range(1, 10); 
+                coin_s c;
+                client_id = random_range(0,  9);
+                item_selected  = random_range(0, 9);
                 coins.delete();
-                int num_coins = random_range(0, 10);    
+                   
                 for (int i = 0; i < num_coins; i++) begin
-                    coin_s c;
+                    
                     c.cur = money_type'($urandom_range(0,2));
                     c.value = random_range(0,  ~6'd0);;
                     coins.push_back(c);
@@ -104,11 +61,12 @@
             endfunction: m_random
 
         `uvm_object_utils_begin(item_buy_seq)
-            `uvm_field_int(client_id    , UVM_ALL_ON)
-            `uvm_field_int(coin_in      , UVM_ALL_ON)
+            `uvm_field_int(client_id, UVM_ALL_ON)
             `uvm_field_enum(money_type, currency_type, UVM_ALL_ON)
-            `uvm_field_int(item_select  , UVM_ALL_ON)
-            `uvm_field_queue_int(coins, UVM_ALL_ON)
+            `uvm_field_int(item_selected  , UVM_ALL_ON)
+            `uvm_field_int(change_out, UVM_ALL_ON)
+            `uvm_field_int(item_out, UVM_ALL_ON)
+            `uvm_field_int(client_points, UVM_ALL_ON)
         `uvm_object_utils_end
 
         endclass
@@ -132,7 +90,6 @@
 
         class many_item_buy_seq extends uvm_sequence#(item_buy_item);
             int unsigned item_num;
-            constraint num_item { item_num inside {[0:10]}; }
 
             `uvm_object_utils_begin(many_item_buy_seq)
                 `uvm_field_int(item_num, UVM_ALL_ON)
@@ -146,7 +103,7 @@
                 repeat(item_num) begin
                     item_buy_item tx = item_buy_item::type_id::create(.name( "item_tx" ));
                     start_item(tx);
-                    assert(tx.randomize());
+                    tx.m_random();
                     finish_item(tx);
                 end
             endtask
@@ -170,16 +127,22 @@
                     item_buy_item tx;
                     seq_item_port.get_next_item(tx);
                     @(posedge vif.clk);
-                    vif.client_id     <= tx.client_id;
-                    vif.item_select   <= tx.item_select;
+
+                    vif.client_id <= tx.client_id;
+                    vif.id_valid <= 1;
+                    
                     foreach (tx.coins[i]) begin
                         @(posedge vif.clk);
                         vif.currency_type <= tx.coins[i].cur;
-                        vif.coin_in       <= tx.coins[i].value;
+                        vif.coin_in <= tx.coins[i].value;
+                        vif.coin_inserted <= 1; 
                     end
+                    @(posedge vif.clk);
+                    vif.item_select <= (10'b1 << tx.item_selected); 
+                    vif.coin_inserted <= 0;
+                    vif.confirmed <= 1;
                 end
-                @(posedge vif.clk);
-                    vif.done <= '1;
+
 
             endtask
         endclass
@@ -203,28 +166,26 @@
 
             task run_phase(uvm_phase phase);
                 forever begin
-                item_buy_item tx = item_buy_item::type_id::create("item_tx", this);
+                    item_buy_item tx = item_buy_item::type_id::create("item_tx", this);
+
+                    
+                    @(posedge vif.clk iff vif.id_valid == 1);
+
+                    tx.client_id   = vif.client_id;
+                    
 
                 
-                @(posedge vif.clk iff vif.client_id != 0 || vif.item_select != 0);
-
-                tx.client_id   = vif.client_id;
-                tx.item_select = vif.item_select;
-
-            
-                tx.coins.delete();
-                while (vif.done != 1) begin
-                    item_buy_item::coin_s coin;
-                    c.cur = money_type'(vif.currency_type);
-                    c.value = vif.coin_in;
-
-                    if (c.value != 0) begin
+                    tx.coins.delete();
+                    while (!vif.confirmed) begin
+                        item_buy_item::coin_s coin;
+                        @(posedge vif.clk iff vif.coin_insert == 1);
+                        c.cur = money_type'(vif.currency_type);
+                        c.value = vif.coin_in;
                         tx.coins.push_back(c);
-                    end
-                    @(posedge vif.clk);
-                end 
-
-            ap.write(tx);
+                    end 
+                    tx.item_selected = $clog2(vif.item_select);
+                    tx.client_points = vif.client_points;
+                    ap.write(tx);
 
                 end
             endtask
@@ -233,62 +194,54 @@
         class vm_scoreboard extends uvm_scoreboard;
             `uvm_component_utils(vm_scoreboard)
 
-            uvm_analysis_export#(item_buy) exp_mon;
-            uvm_analysis_export#(item_buy) got_mon;
-
-            mailbox #(item_buy) exp_mb, got_mb; // ? 
+            uvm_analysis_imp#(item_buy_item, vm_scoreboard) imp;
 
             function new(string name, uvm_component parent=null);
                 super.new(name, parent);
-                exp_mb = new();
-                got_mb = new();
             endfunction
 
             function void build_phase(uvm_phase phase);
                 super.build_phase(phase);
-                exp_mon = new("exp_mon", this);
-                got_mon = new("got_mon", this);
+                imp = new("imp", this);
             endfunction
 
-            task run_phase(uvm_phase phase);
-                item_buy exp, got;
-                forever begin
-                    exp_mb.get(exp);
-                    got_mb.get(got);
-
-                    if (compare(exp, got))
-                        `uvm_info("SCOREBOARD", $sformatf("PASS: %s", got.convert2string()), UVM_LOW)
-                    else
-                        `uvm_error("SCOREBOARD", $sformatf("FAIL exp=%s got=%s", 
-                                exp.convert2string(), got.convert2string()))
+            function void write(item_buy_item tx);
+                int money = 0;
+                foreach (tx.coins[i]) begin
+                    money += tx.coins[i].value;
                 end
-            endtask
 
-            function bit compare(item_buy exp, item_buy got);
-            // ПОка просто проверяем что пришло 
-                if (exp.client_id    != got.client_id)    
-                    return 0;
-                if (exp.item_select  != got.item_select)  
-                    return 0;
-                if (exp.coins.size() != got.coins.size()) 
-                    return 0;
-                for (int i = 0; i < exp.coins.size(); i++) begin
-                    if (exp.coins[i].cur   != got.coins[i].cur)   
-                        return 0;
-                    if (exp.coins[i].value != got.coins[i].value) 
-                        return 0;
+                price = tx.item_selected * 10;
+                int change = 0;
+                int exp_item_out;
+                int exp_points;
+                int discount = tx.client_id % 3;
+                if (tx.client_id % 10 == 0) discount += 10;
+                price = price * (100.0 - discount) / 100.0;
+                if (sum >= price) begin
+                    exp_item_out = 10'b1 << tx.item_selected;
+                    change = sum - price;
+                    exp_points = sum / 20; 
+                end else begin
+                    exp_item_out = '0;
+                    change       = sum;
+                    exp_points   = 0;
                 end
-                return 1;
+
+                `uvm_info("SCOREBOARD",
+                        $sformatf("Client=%0d Item=%0d Sum=%0d Exp_item_out=%b Exp_change=%0d Exp_points=%0d",
+                                    tx.client_id, tx.item_selected, sum, exp_item_out, change, exp_points),
+                        UVM_LOW)
             endfunction
 
-        endclass
+    endclass
 
         class vm_agent extends uvm_agent;
             `uvm_component_utils(vm_agent)
 
-            vm_driver    drv;
-            vm_monitor   mon;
-            uvm_sequencer#(item_buy) seqr;
+            vm_driver drv;
+            vm_monitor mon;
+            uvm_sequencer#(item_buy_item) seqr;
 
             virtual user_in_if vif;
 
@@ -323,8 +276,8 @@
         class vm_env extends uvm_env;
             `uvm_component_utils(vm_env)
 
-            vm_agent       agent;
-            vm_scoreboard  scb;
+            vm_agent agent;
+            vm_scoreboard scb;
 
             function new(string name, uvm_component parent=null);
                 super.new(name, parent);
@@ -342,6 +295,7 @@
             endfunction
         endclass
 
+        //Любой тест наследуется от этого 
         class base_test extends uvm_test;
             `uvm_component_utils(base_test)
 
@@ -355,7 +309,6 @@
                 super.build_phase(phase);
                 env = vm_env::type_id::create("env", this);
             endfunction
-            // ? 
             task run_phase(uvm_phase phase);
                 item_buy item_tx;
 
@@ -371,8 +324,50 @@
         endclass
     endpackage 
     
+// top - подключение dut инициализация передача интерфейса в агент настройка rst clk вызывать функцию run_test 
+
+class buy_test extends base_test;
+    `uvm_component_utils(discount_test)
+
+    function new(string name, uvm_component parent=null);
+        super.new(name, parent);
+    endfunction
+
+    task run_phase(uvm_phase phase);
+        phase.raise_objection(this);
+
+        many_item_buy_seq seq;
+        seq = many_item_buy_seq::type_id::create("seq");
+        seq.item_num = 5;  
+        seq.start(env.agent.seqr);
+
+        #200ns;
+        phase.drop_objection(this);
+    endtask
+endclass
 
 
+
+module top;
+    import uvm_pkg::*;
+    import vending_machine::*;
+
+    bit clk;
+    bit rst_n;
+
+    user_in_if uif(.clk(clk), .rst_n(rst_n));
+
+    initial forever #5 clk = ~clk;
+
+    initial begin
+        rst_n = 0;
+        repeat (5) @(posedge clk);
+        rst_n = 1;
+
+        uvm_config_db#(virtual user_in_if)::set(null, "*", "vif", uif);
+        run_test("base_test");
+    end
+endmodule
 
 
 
